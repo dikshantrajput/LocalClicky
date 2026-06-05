@@ -1,0 +1,44 @@
+# Virtual environment
+venv/
+env/
+.venv/
+
+# Python cache
+__pycache__/
+*.py[cod]
+*.pyo
+*.so
+*.egg-info/
+dist/
+build/
+
+# Environment variables
+.env
+.env.local
+
+# Runtime temp files
+*.wav
+*.jpg
+*.mp3
+localclicky_audio.wav
+localclicky_screen.jpg
+
+# macOS
+.DS_Store
+._*
+.Spotlight-V100
+.Trashes
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*~
+
+# Logs
+*.log
+
+# Model files (large — download separately via ollama pull)
+*.bin
+*.gguf
+*.ggml
