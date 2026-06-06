@@ -26,7 +26,7 @@ No data leaves your machine. Not your voice. Not your screenshots. Not your comm
 ## What it can do
 
 - Sits in the menubar — no Dock icon, stays out of the way
-- Say **"Computer"** → starts a session — stays active until you say goodbye
+- Say **"Hey Jarvis"** → starts a session — stays active until you say goodbye
 - **Voice Activity Detection** — auto-stops recording when you stop talking (no fixed timeout)
 - **Sees your screen on demand** — vision model (gemma4:e4b) takes a screenshot when needed
 - **Moves your cursor and clicks** based on what it sees on screen
@@ -85,6 +85,7 @@ cd PyClicky
 python3 -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
+python -c "import openwakeword; openwakeword.utils.download_models()"
 ```
 
 ### 4. Silence detection (optional but recommended)
@@ -129,7 +130,7 @@ LocalClicky needs three macOS permissions for the `python3` binary inside your v
 
 ### Starting a session
 
-Say **"Computer"** — the icon turns 🔴 and recording starts. When you stop talking, it automatically processes your command and responds.
+Say **"Hey Jarvis"** — the icon turns 🔴 and recording starts. When you stop talking, it automatically processes your command and responds.
 
 After responding, it stays active and listens for your next command immediately — **no need to say "Computer" again**.
 
@@ -200,7 +201,7 @@ PyClicky/
 ├── main.py                # rumps menubar app — icons, menu, state display
 ├── companion.py           # state machine — session management, full pipeline
 ├── ollama_client.py       # qwen3 with tools, gemma4 vision via look_at_screen
-├── wake_word.py           # sliding-window wake word via Google Speech Recognition
+├── wake_word.py           # offline wake word via openWakeWord (hey_jarvis pretrained model)
 ├── audio_recorder.py      # sounddevice mic capture + VAD silence detection → WAV
 ├── whisper_transcriber.py # calls whisper-cli subprocess, returns transcript
 ├── screen_capture.py      # screencapture → resize to 1280px → base64 JPEG
@@ -232,13 +233,24 @@ The command model must support reliable tool calling. The vision model must be m
 | `gemma4:27b` | `qwen3:8b` | Better vision accuracy, needs ~32GB RAM |
 | `qwen2.5vl:7b` | `qwen3:8b` | Alternative vision model |
 
-### Change wake word
+### Change wake word / detection threshold
 
 Edit `wake_word.py`:
 
 ```python
-WAKE_PHRASES = ["computer", "hey computer", "okay computer"]
+# Use a different pretrained model (e.g. "alexa", "hey_mycroft"):
+WAKE_MODEL = "hey_jarvis"
+
+# Point to a custom trained .onnx or .tflite file instead:
+WAKE_MODEL_PATH = "/path/to/your/computer.onnx"  # overrides WAKE_MODEL when set
+
+# Lower = more sensitive (more false positives), higher = stricter:
+DETECTION_THRESHOLD = 0.5
 ```
+
+To train a custom "computer" model, follow the
+[openWakeWord training guide](https://github.com/dscripka/openWakeWord/blob/main/docs/training.md),
+then set `WAKE_MODEL_PATH` to the output `.onnx` file.
 
 ### Change session idle timeout
 
@@ -288,9 +300,11 @@ OLLAMA_URL = "http://localhost:11434/api/chat"
 - Grant Accessibility to Terminal in System Settings → Privacy & Security → Accessibility
 
 **Wake word never triggers**
-- Wake word detection uses Google Speech Recognition — requires an internet connection
-- Speak clearly, pause before "Computer"
-- Check logs for `heard:` lines
+- Wake word detection runs fully offline via openWakeWord — no internet needed
+- Default keyword is **"hey Jarvis"** (not "Computer") — say that phrase to trigger
+- To use a different keyword, change `WAKE_MODEL` in `wake_word.py` (see Configuration)
+- Check logs for `WAKE triggered:` lines; lower `DETECTION_THRESHOLD` if it's not firing
+- Speak clearly and at normal pace — very fast or whispered speech may score below threshold
 
 **Mic error when OBS or Zoom is running**
 - The app will retry 5 times automatically
@@ -316,7 +330,6 @@ OLLAMA_URL = "http://localhost:11434/api/chat"
 - Python 3.11+
 - Homebrew
 - ~8GB RAM free (for both models)
-- Internet connection for wake word detection (Google Speech Recognition)
 - Ollama running locally
 
 ---
@@ -330,7 +343,7 @@ OLLAMA_URL = "http://localhost:11434/api/chat"
 | `soundfile` | Write WAV files |
 | `numpy` | Audio buffer manipulation |
 | `httpx` | Streaming HTTP to Ollama |
-| `SpeechRecognition` | Wake word via Google Speech API |
+| `openwakeword` | Offline wake word detection |
 | `pyautogui` | Cursor movement and clicks |
 | `Pillow` | Screenshot resize |
 | `webrtcvad-wheels` | Voice activity detection (optional) |
@@ -341,7 +354,7 @@ OLLAMA_URL = "http://localhost:11434/api/chat"
 
 LocalClicky is early. Meaningful areas to improve:
 
-- **Offline wake word** — replace Google Speech Recognition with a local model (Porcupine, openWakeWord)
+- **Custom "computer" wake word** — train a personal openWakeWord model using the [training guide](https://github.com/dscripka/openWakeWord/blob/main/docs/training.md) and swap `WAKE_MODEL_PATH` in `wake_word.py`
 - **App-specific skills** — context-aware commands for Terminal, Xcode, Figma, VS Code
 - **Packaging** — proper `.app` bundle so users don't need to run from terminal
 - **Windows / Linux ports** — the core pipeline is cross-platform; the menubar layer isn't

@@ -1,22 +1,16 @@
-import os
 import threading
 import logging
 import numpy as np
 import sounddevice as sd
-import speech_recognition as sr
-from collections import deque
-from pathlib import Path
-from dotenv import load_dotenv
+from openwakeword.model import Model
 
 log = logging.getLogger(__name__)
 
-load_dotenv(Path(__file__).parent / ".env")
-
-_raw = os.environ.get("WAKE_PHRASES", "computer,hey computer,okay computer")
-WAKE_PHRASES = [p.strip().lower() for p in _raw.split(",") if p.strip()]
+WAKE_MODEL = "hey_jarvis"
+WAKE_MODEL_PATH: str | None = None  # set to a local .onnx/.tflite path to override WAKE_MODEL
+DETECTION_THRESHOLD = 0.5
 SAMPLE_RATE = 16000
-WINDOW_SECONDS = 3    # how much audio to recognize at once
-STEP_SECONDS = 1      # slide forward by this much each time
+CHUNK_SAMPLES = 1280  # 80 ms at 16 kHz, as expected by openWakeWord
 
 
 class WakeWordDetector:
@@ -30,72 +24,40 @@ class WakeWordDetector:
         self._stop_event.clear()
         self._thread = threading.Thread(target=self._listen_loop, daemon=True)
         self._thread.start()
-        log.info("wake word detector started")
+        log.info("wake word detector started (model=%s)", WAKE_MODEL_PATH or WAKE_MODEL)
 
     def stop(self):
         self._stop_event.set()
         log.info("wake word detector stopped")
 
     def _listen_loop(self):
-        recognizer = sr.Recognizer()
-        step_samples = int(STEP_SECONDS * SAMPLE_RATE)
-        window_samples = int(WINDOW_SECONDS * SAMPLE_RATE)
+        models = [WAKE_MODEL_PATH] if WAKE_MODEL_PATH else [WAKE_MODEL]
+        oww = Model(wakeword_models=models, inference_framework="onnx")
 
-        # Circular buffer holds WINDOW_SECONDS of audio
-        buffer: deque[np.ndarray] = deque()
-        buffer_len = 0
+        audio_queue: list[np.ndarray] = []
 
         def audio_callback(indata, frames, time, status):
-            buffer.append(indata[:, 0].copy())
-            nonlocal buffer_len
-            buffer_len += len(indata)
+            audio_queue.append(indata[:, 0].copy())
 
-        with sd.InputStream(samplerate=SAMPLE_RATE, channels=1, dtype="int16",
-                            blocksize=step_samples, callback=audio_callback):
+        with sd.InputStream(
+            samplerate=SAMPLE_RATE,
+            channels=1,
+            dtype="int16",
+            blocksize=CHUNK_SAMPLES,
+            callback=audio_callback,
+        ):
             log.info("wake word stream open")
             while not self._stop_event.is_set():
-                # Wait until we have a full window
-                if buffer_len < window_samples:
-                    self._stop_event.wait(timeout=STEP_SECONDS)
+                if not audio_queue:
+                    self._stop_event.wait(timeout=0.01)
                     continue
 
-                # Drain oldest step from buffer, keep rest
-                chunk = np.concatenate(list(buffer))
-                # Trim to window size
-                window = chunk[-window_samples:]
+                scores = oww.predict(audio_queue.pop(0))
 
-                # Convert to bytes for SpeechRecognition
-                raw = (window.astype(np.int16)).tobytes()
-                audio_data = sr.AudioData(raw, SAMPLE_RATE, 2)
-
-                try:
-                    text = recognizer.recognize_google(audio_data).lower()
-                    log.info("heard: %s", text)
-                    words = text.split()
-                    tail = " ".join(words[-5:])
-                    for phrase in WAKE_PHRASES:
-                        if phrase in tail:
-                            log.info("WAKE triggered: %s", tail)
-                            self._stop_event.set()
-                            if self._callback:
-                                self._callback()
-                            return
-                except sr.UnknownValueError:
-                    pass
-                except sr.RequestError as e:
-                    log.warning("recognition error: %s", e)
-
-                # Slide: drop oldest step worth of samples
-                to_drop = step_samples
-                while buffer and to_drop > 0:
-                    chunk = buffer[0]
-                    if len(chunk) <= to_drop:
-                        to_drop -= len(chunk)
-                        buffer_len -= len(chunk)
-                        buffer.popleft()
-                    else:
-                        buffer[0] = chunk[to_drop:]
-                        buffer_len -= to_drop
-                        to_drop = 0
-
-                self._stop_event.wait(timeout=STEP_SECONDS)
+                for model_name, score in scores.items():
+                    if score >= DETECTION_THRESHOLD:
+                        log.info("WAKE triggered: model=%s score=%.3f", model_name, score)
+                        self._stop_event.set()
+                        if self._callback:
+                            self._callback()
+                        return
