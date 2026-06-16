@@ -61,7 +61,7 @@ class LocalClickyApp(rumps.App):
     def _state_label(self, state: str) -> str:
         return {
             AppState.IDLE:         "Ready",
-            AppState.LISTENING:    "Listening for 'Computer'…",
+            AppState.LISTENING:    "Listening for 'Hey Jarvis'…",
             AppState.RECORDING:    "Recording…",
             AppState.TRANSCRIBING: "Transcribing…",
             AppState.THINKING:     "Thinking…",

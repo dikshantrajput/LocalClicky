@@ -4,7 +4,6 @@ import logging
 import re
 
 import ollama_client
-import screen_capture
 import whisper_transcriber
 import cursor_control
 from audio_recorder import AudioRecorder
@@ -93,6 +92,7 @@ class CompanionManager:
         self._in_session = False
         self._cancel_session_timer()
         self._recorder.stop() if self.state == AppState.RECORDING else None
+        ollama_client.reset_session_context()
         self.start_listening()
 
 
@@ -170,24 +170,14 @@ class CompanionManager:
             self._end_session()
             return
 
-        # Screenshot
-        self._set_state(AppState.THINKING)
-        capture_result = screen_capture.capture()
-        if capture_result:
-            image, image_size, physical_size = capture_result
-        else:
-            image, image_size, physical_size = None, None, None
-            log.warning("screenshot FAILED — vision model will NOT be used")
-
         # Ollama
+        self._set_state(AppState.THINKING)
         self.response = ""
         try:
             response = ollama_client.chat(
                 history=self.history,
                 user_text=text,
-                base64_image=image,
                 on_token=self._handle_token,
-                image_size=image_size
             )
         except Exception as e:
             err = str(e)
@@ -206,10 +196,8 @@ class CompanionManager:
             spoken = raw
         if action_tag:
             log.info("cursor action: %s", action_tag)
-            eff_image_size = image_size or ollama_client._last_image_size
-            eff_physical_size = physical_size or ollama_client._last_physical_size
-            if eff_image_size and eff_physical_size:
-                cursor_control.execute(action_tag, eff_image_size, eff_physical_size)
+            if ollama_client._last_image_size and ollama_client._last_physical_size:
+                cursor_control.execute(action_tag, ollama_client._last_image_size, ollama_client._last_physical_size)
             else:
                 log.warning("cursor action ignored — no screenshot size available")
         spoken = spoken if spoken else "Done."
@@ -252,6 +240,7 @@ class CompanionManager:
     def clear_history(self):
         self.history = []
         self.conversation = []
+        ollama_client.reset_session_context()
 
     def push_to_talk_start(self):
         if self.state in (AppState.IDLE, AppState.LISTENING):

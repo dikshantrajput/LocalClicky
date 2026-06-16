@@ -18,12 +18,13 @@ MAX_TOOL_ROUNDS = 5
 _SYSTEM_PROMPT = """You are a voice-controlled Mac assistant. The user speaks to you — your responses are read aloud, so be brief and natural.
 
 TOOLS:
-- run_shell_command — execute zsh to control the Mac (apps, files, settings, osascript)
+- run_shell_command — execute zsh to control the Mac (apps, files, settings, osascript, ffmpeg)
 - query_system — read-only shell to check state (use before acting if uncertain, or to confirm a result)
 - look_at_screen — your eyes: takes a screenshot and sees/clicks what's on screen
 
 WHEN TO USE EACH:
 - App control, files, settings, Spotify, volume → run_shell_command
+- Video editing (trim, cut, merge, mute, speed, resize, watermark) → run_shell_command with ffmpeg
 - Need to know current state before acting → query_system first
 - User asks to click, point, find, or describe something on screen → look_at_screen (once — do not call it repeatedly)
 - "How do I…" / "Can you help me…" / advice questions → answer from knowledge directly, no tools
@@ -36,7 +37,23 @@ HARD RULES:
 - run_shell_command exit 0 with no output = SUCCESS — do NOT say it failed or call query_system just to confirm an obvious action (quit, open, move)
 - Only call query_system when you genuinely need to verify a non-obvious result or check state
 - If the user says "yes", "go ahead", "do it" — look at the conversation history to know what to do
-- Response length: 1 sentence max. No preamble, no filler, no "I'll now...", just do it and confirm in one line."""
+- Response length: 1 sentence max. No preamble, no filler, no "I'll now...", just do it and confirm in one line.
+
+VIDEO EDITING (ffmpeg):
+Always place -ss / -to BEFORE -i for fast seek. Always use -y to overwrite output without prompting.
+Output files go to ~/Desktop/ unless the user specifies otherwise.
+- Trim:        ffmpeg -y -ss 00:00:10 -to 00:00:30 -i ~/Desktop/in.mp4 -c copy ~/Desktop/out.mp4
+- Mute audio:  ffmpeg -y -i ~/Desktop/in.mp4 -an -c:v copy ~/Desktop/out.mp4
+- Replace audio: ffmpeg -y -i ~/Desktop/video.mp4 -i ~/Desktop/audio.mp3 -c:v copy -map 0:v:0 -map 1:a:0 -shortest ~/Desktop/out.mp4
+- Speed 2x:    ffmpeg -y -i ~/Desktop/in.mp4 -filter:v "setpts=0.5*PTS" -filter:a "atempo=2.0" ~/Desktop/out.mp4
+- Resize:      ffmpeg -y -i ~/Desktop/in.mp4 -vf "scale=1280:720" ~/Desktop/out.mp4
+- Add text:    ffmpeg -y -i ~/Desktop/in.mp4 -vf "drawtext=text='Hello':fontsize=48:fontcolor=white:x=10:y=10" ~/Desktop/out.mp4
+- Concat 2:    ffmpeg -y -i ~/Desktop/a.mp4 -i ~/Desktop/b.mp4 -filter_complex "[0:v][0:a][1:v][1:a]concat=n=2:v=1:a=1" ~/Desktop/out.mp4
+- Extract audio: ffmpeg -y -i ~/Desktop/in.mp4 -vn -acodec mp3 ~/Desktop/out.mp3
+- Convert:     ffmpeg -y -i ~/Desktop/in.mov ~/Desktop/out.mp4
+- If the user mentions a file by name (e.g. "my vacation video", "the intro clip") — call find_file first. Only call pick_file if the user gives no name at all.
+- If pick_file or find_file returns a message starting with CANCELLED — stop immediately, do not call any file tool again, just tell the user no file was selected.
+- Before running ffmpeg, use query_system to confirm the input file exists."""
 
 
 TOOLS = [
@@ -112,6 +129,51 @@ TOOLS = [
     {
         "type": "function",
         "function": {
+            "name": "pick_file",
+            "description": (
+                "Opens a native macOS file picker so the user can select a file by clicking. "
+                "Use this whenever you need a file path and the user hasn't provided one — "
+                "especially for video editing. Returns the full absolute path of the selected file. "
+                "Do NOT ask the user to say or type a path — just call this tool."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "prompt": {
+                        "type": "string",
+                        "description": "Short label shown at the top of the file picker, e.g. 'Select the video to trim'"
+                    }
+                },
+                "required": ["prompt"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "find_file",
+            "description": (
+                "Search for a file by name across common user folders (Desktop, Downloads, Movies, Documents, Pictures, home). "
+                "Use this when the user mentions a file by name in their voice command — e.g. 'my vacation video', 'the clip called intro'. "
+                "If exactly one match is found, it is automatically selected as the active file (no picker needed). "
+                "If multiple are found, return the list so you can read the options to the user. "
+                "Prefer this over pick_file whenever the user names or describes a file."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "description": "Partial filename to search for, e.g. 'vacation' or 'intro clip'. Case-insensitive."
+                    }
+                },
+                "required": ["name"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "look_at_screen",
             "description": (
                 "Your eyes. Takes a screenshot and either describes what's visible or clicks an element. "
@@ -143,6 +205,10 @@ def _run_tool(name: str, args: dict) -> str:
         if exit_code == 0:
             return output if output else "Success (command completed with no output)"
         return f"Error (exit {exit_code}): {output}"
+    if name == "find_file":
+        return _find_file(args.get("name", ""))
+    if name == "pick_file":
+        return _pick_file(args.get("prompt", "Select a file"))
     if name == "create_reminder":
         return _create_reminder(args.get("name", "Reminder"), args.get("due_date"))
     if name == "look_at_screen":
@@ -156,6 +222,49 @@ _last_image_size: tuple[int, int] | None = None
 _last_physical_size: tuple[int, int] | None = None
 _last_cursor_action: str | None = None
 _turn_screenshot: tuple | None = None
+_last_picked_file: str | None = None
+
+def _find_file(name: str) -> str:
+    global _last_picked_file
+    import os, subprocess
+    from shell_executor import run
+
+    # strip extension if the user said the full filename e.g. "clicky.mp4"
+    stem = os.path.splitext(name)[0] if "." in name else name
+
+    cmd = (
+        f"find ~ -maxdepth 5 -type f "
+        f"\\( -iname '*{stem}*.mp4' -o -iname '*{stem}*.mov' -o -iname '*{stem}*.avi' "
+        f"-o -iname '*{stem}*.mkv' -o -iname '*{stem}*.m4v' -o -iname '*{stem}*.webm' \\) "
+        f"2>/dev/null | head -10"
+    )
+    output, _ = run(cmd)
+    matches = [p.strip() for p in output.splitlines() if p.strip()]
+
+    if not matches:
+        subprocess.Popen(["say", f"Couldn't find {name}, please select it manually"])
+        return _pick_file(f"'{name}' not found — select the video manually")
+
+    if len(matches) == 1:
+        _last_picked_file = matches[0]
+        log.info("find_file: auto-selected %s", _last_picked_file)
+        return f"Found and selected: {matches[0]}"
+
+    lines = "\n".join(f"{i+1}. {p}" for i, p in enumerate(matches))
+    return f"Found {len(matches)} matches — ask the user which one:\n{lines}"
+
+
+def _pick_file(prompt: str) -> str:
+    global _last_picked_file
+    from shell_executor import run
+    script = f'set f to choose file with prompt "{prompt}"\nreturn POSIX path of f'
+    output, exit_code = run(f"osascript << 'EOF'\n{script}\nEOF")
+    if exit_code == 0 and output.strip():
+        _last_picked_file = output.strip()
+        log.info("pick_file: selected %s", _last_picked_file)
+        return _last_picked_file
+    return "CANCELLED: user dismissed the file picker — stop here, do not open another picker, just tell the user no file was selected."
+
 
 def _create_reminder(name: str, due_date: str | None) -> str:
     from shell_executor import run
@@ -248,8 +357,13 @@ def _extract_run_commands(text: str) -> tuple[str, list[str]]:
     return clean, [c.strip() for c in commands]
 
 
-def chat(history: list[dict], user_text: str, base64_image: str | None, on_token,
-    image_size: tuple[int, int] | None = None) -> str:
+def reset_session_context():
+    global _last_picked_file
+    _last_picked_file = None
+    log.info("session context cleared")
+
+
+def chat(history: list[dict], user_text: str, on_token) -> str:
     global _last_image_size, _last_physical_size, _last_cursor_action, _turn_screenshot
     _last_cursor_action = None
     _turn_screenshot = None
@@ -257,8 +371,12 @@ def chat(history: list[dict], user_text: str, base64_image: str | None, on_token
     model = COMMAND_MODEL
     log.info("using model: %s", model)
 
+    system = _SYSTEM_PROMPT
+    if _last_picked_file:
+        system += f"\n\nSESSION CONTEXT: The user already selected this file: {_last_picked_file} — use it directly, do NOT call pick_file again."
+
     user_msg: dict = {"role": "user", "content": user_text}
-    messages = [{"role": "system", "content": _SYSTEM_PROMPT}] + history + [user_msg]
+    messages = [{"role": "system", "content": system}] + history + [user_msg]
 
     with httpx.Client(timeout=120) as client:
         for round_num in range(MAX_TOOL_ROUNDS):

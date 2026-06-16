@@ -31,6 +31,7 @@ No data leaves your machine. Not your voice. Not your screenshots. Not your comm
 - **Sees your screen on demand** — vision model (gemma4:e4b) takes a screenshot when needed
 - **Moves your cursor and clicks** based on what it sees on screen
 - **Controls your Mac**: open/quit apps, adjust volume, control Spotify, manage files, run shell commands, inject JS into Chrome
+- **Edits videos**: trim, mute, merge, speed up, resize, add text — all via ffmpeg, no upload
 - **Creates reminders** with natural language dates
 - Multi-round tool calling — runs commands, checks results, confirms or retries
 - Conversation memory across the session (last 10 exchanges)
@@ -78,7 +79,15 @@ ollama pull qwen3:8b     # command model — tool calling, Mac control
 ollama pull gemma4:e4b   # vision model — sees your screen when needed
 ```
 
-### 3. Python dependencies
+### 3. ffmpeg (video editing)
+
+```bash
+brew install ffmpeg
+```
+
+Required for any video editing commands. Skip if you don't need video editing.
+
+### 4. Python dependencies
 
 ```bash
 cd PyClicky
@@ -88,7 +97,7 @@ pip install -r requirements.txt
 python -c "import openwakeword; openwakeword.utils.download_models()"
 ```
 
-### 4. Silence detection (optional but recommended)
+### 5. Silence detection (optional but recommended)
 
 ```bash
 pip install webrtcvad-wheels
@@ -154,6 +163,10 @@ The session also auto-expires after **25 seconds of silence**.
 | "Play next track" | AppleScript skips to next Spotify track |
 | "Make a folder called Projects on my Desktop" | `mkdir ~/Desktop/Projects` |
 | "What is the capital of France?" | Answers directly, no tools needed |
+| "Trim the video on my desktop from 10 seconds to 30 seconds" | ffmpeg cuts the clip, saves to Desktop |
+| "Mute the audio in intro dot mp4" | ffmpeg strips audio track |
+| "Speed up the video to 2x" | ffmpeg applies setpts + atempo filters |
+| "Merge video dot mp4 and clip dot mp4" | ffmpeg concat filter, saves to Desktop |
 
 ### How screen interaction works
 
